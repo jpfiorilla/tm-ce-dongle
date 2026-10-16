@@ -17,6 +17,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include "USB.h"
 #include "USBMSC.h"
 #include "driver/sdmmc_host.h"
@@ -42,6 +43,11 @@ static const uint16_t TMSYNC_DISCOVERY_PORT = 8643;
 USBMSC MSC;
 static sdmmc_card_t card;
 static bool card_ok = false;
+
+// USB activity counters, persisted to NVS so the next boot can report what the host did.
+static volatile uint32_t usb_reads = 0, usb_writes = 0, usb_startstops = 0;
+static volatile uint32_t usb_first_io_ms = 0;
+static Preferences prefs;
 
 // ---------------------------------------------------------------------------
 // SD card: raw access for USB, FAT mount for the sync phase
@@ -284,8 +290,19 @@ static void sync_save(const Config &cfg, uint32_t deadline) {
   note("installed " + cfg.game + ".raw (" + String(len) + " bytes, etag " + new_etag + ")");
 }
 
+static String previous_session() {
+  prefs.begin("tmce", true);
+  uint32_t r = prefs.getUInt("reads", 0), w = prefs.getUInt("writes", 0), ss = prefs.getUInt("ss", 0), f = prefs.getUInt("first", 0);
+  bool any = prefs.isKey("reads");
+  prefs.end();
+  if (!any) return "";
+  return "prev session: " + String(r) + " reads, " + String(w) + " writes, " + String(ss) + " start/stop" + (f ? ", first IO at " + String(f) + "ms" : ", host never read");
+}
+
 static void wifi_phase() {
   uint32_t t0 = millis();
+  String prev = previous_session();
+  if (prev.length()) note(prev);
   if (!fat_mount()) { note("card not FAT32, sync skipped"); return; }
   Config cfg = load_config();
   if (!cfg.sync) note("SYNC=false");
@@ -313,18 +330,22 @@ static void wifi_phase() {
 // USB mass storage
 // ---------------------------------------------------------------------------
 static int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
+  usb_reads++;
+  if (!usb_first_io_ms) usb_first_io_ms = millis();
   if (!card_ok) return -1;
   if (sdmmc_read_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK) return -1;
   return bufsize;
 }
 
 static int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize) {
+  usb_writes++;
+  if (!usb_first_io_ms) usb_first_io_ms = millis();
   if (!card_ok) return -1;
   if (sdmmc_write_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK) return -1;
   return bufsize;
 }
 
-static bool onStartStop(uint8_t power_condition, bool start, bool load_eject) { return true; }
+static bool onStartStop(uint8_t power_condition, bool start, bool load_eject) { usb_startstops++; return true; }
 
 void setup() {
   wifi_phase();  // never blocks longer than ~35 s, and never fatal
@@ -334,9 +355,19 @@ void setup() {
     if (!card_ok) delay(500);
   }
 
+  // Present as a plain single-function flash drive (class defined at interface level),
+  // not the Arduino default "miscellaneous / IAD composite" device class.
+  USB.usbClass(0);
+  USB.usbSubClass(0);
+  USB.usbProtocol(0);
+  USB.usbAttributes(0x80);  // bus powered
+  USB.usbPower(500);
+  USB.productName("TM-CE Dongle");
+  USB.manufacturerName("JohnFio");
+
   MSC.vendorID("JOHNFIO");
   MSC.productID("TM-CE DONGLE");
-  MSC.productRevision("0.3");
+  MSC.productRevision("0.4");
   MSC.onStartStop(onStartStop);
   MSC.onRead(onRead);
   MSC.onWrite(onWrite);
@@ -345,4 +376,17 @@ void setup() {
   USB.begin();
 }
 
-void loop() { delay(1000); }
+void loop() {
+  // Persist USB activity counters every 2 s (only when they changed) for the next boot's log.
+  static uint32_t saved_r = UINT32_MAX, saved_w = UINT32_MAX, saved_ss = UINT32_MAX;
+  if (usb_reads != saved_r || usb_writes != saved_w || usb_startstops != saved_ss) {
+    saved_r = usb_reads; saved_w = usb_writes; saved_ss = usb_startstops;
+    prefs.begin("tmce", false);
+    prefs.putUInt("reads", saved_r);
+    prefs.putUInt("writes", saved_w);
+    prefs.putUInt("ss", saved_ss);
+    prefs.putUInt("first", usb_first_io_ms);
+    prefs.end();
+  }
+  delay(2000);
+}
