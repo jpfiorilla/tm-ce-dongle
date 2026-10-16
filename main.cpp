@@ -23,6 +23,7 @@
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -325,11 +326,44 @@ static String previous_session() {
   return out;
 }
 
+
+// Debug: where directories/files live on the card (cluster -> LBA), to match against host IO traces.
+static String fat_layout() {
+  FATFS *fs = nullptr;
+  DWORD free_cl = 0;
+  if (f_getfree("0:", &free_cl, &fs) != FR_OK || !fs) return "layout: f_getfree failed";
+  auto lba_of = [&](DWORD clust) -> uint32_t { return (uint32_t)(fs->database + (LBA_t)(clust - 2) * fs->csize); };
+  String out = "layout: fat_type=" + String(fs->fs_type) + " csize=" + String(fs->csize) + " fatbase=" + String((uint32_t)fs->fatbase) +
+               " database=" + String((uint32_t)fs->database) + " dirbase=" + String((uint32_t)fs->dirbase);
+  const char *dirs[] = {"0:/", "0:/games"};
+  for (const char *d : dirs) {
+    FF_DIR dir;
+    if (f_opendir(&dir, d) != FR_OK) { out += String("\n  ") + d + ": opendir FAILED"; continue; }
+    out += String("\n  ") + d + " @ lba " + String(lba_of(dir.obj.sclust ? dir.obj.sclust : (DWORD)fs->dirbase));
+    FILINFO fi;
+    while (f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
+      String full = String(d) + (String(d).endsWith("/") ? "" : "/") + fi.fname;
+      uint32_t lba = 0;
+      if (fi.fattrib & AM_DIR) {
+        FF_DIR sub;
+        if (f_opendir(&sub, full.c_str()) == FR_OK) { lba = lba_of(sub.obj.sclust); f_closedir(&sub); }
+      } else {
+        FIL f;
+        if (f_open(&f, full.c_str(), FA_READ) == FR_OK) { lba = lba_of(f.obj.sclust); f_close(&f); }
+      }
+      out += "\n    " + String(fi.fname) + " [alt " + String(fi.altname) + "] attr=0x" + String(fi.fattrib, HEX) + " size=" + String((uint32_t)fi.fsize) + " @ lba " + String(lba);
+    }
+    f_closedir(&dir);
+  }
+  return out + "\n ";
+}
+
 static void wifi_phase() {
   uint32_t t0 = millis();
   String prev = previous_session();
   if (prev.length()) note(prev);
   if (!fat_mount()) { note("card not FAT32, sync skipped"); return; }
+  note(fat_layout());
   Config cfg = load_config();
   if (!cfg.sync) note("SYNC=false");
   else if (!cfg.ssid.length()) note("no SSID in CONFIG/config.txt");
@@ -395,7 +429,7 @@ void setup() {
 
   MSC.vendorID("JOHNFIO");
   MSC.productID("TM-CE DONGLE");
-  MSC.productRevision("0.5");
+  MSC.productRevision("0.6");
   MSC.onStartStop(onStartStop);
   MSC.onRead(onRead);
   MSC.onWrite(onWrite);
