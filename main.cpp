@@ -358,12 +358,38 @@ static String fat_layout() {
   return out + "\n ";
 }
 
+// Debug: copy the raw sectors a host needs to list /games (MBR, VBR region, FAT head,
+// root + games dir pages) into CONFIG/rawdump.bin so the host's FAT code can be replayed offline.
+static void dump_raw() {
+  if (!fat_card) return;
+  FILE *f = fopen(MNT "/CONFIG/rawdump.bin", "wb");
+  if (!f) return;
+  FATFS *fs = nullptr; DWORD fc = 0;
+  if (f_getfree("0:", &fc, &fs) != FR_OK || !fs) { fclose(f); return; }
+  uint32_t ranges[][2] = {
+    {0, 64}, {32768, 64}, {(uint32_t)fs->fatbase, 64},
+    {(uint32_t)(fs->database / 64 * 64), 192},
+    {101760, 192},
+  };
+  static uint8_t buf[512 * 8];
+  for (auto &r : ranges) {
+    for (uint32_t s = r[0]; s < r[0] + r[1]; s += 8) {
+      if (sdmmc_read_sectors(fat_card, buf, s, 8) != ESP_OK) continue;
+      uint32_t hdr[2] = {s, 8};
+      fwrite(hdr, 1, 8, f);
+      fwrite(buf, 1, sizeof(buf), f);
+    }
+  }
+  fclose(f);
+}
+
 static void wifi_phase() {
   uint32_t t0 = millis();
   String prev = previous_session();
   if (prev.length()) note(prev);
   if (!fat_mount()) { note("card not FAT32, sync skipped"); return; }
   note(fat_layout());
+  dump_raw();
   Config cfg = load_config();
   if (!cfg.sync) note("SYNC=false");
   else if (!cfg.ssid.length()) note("no SSID in CONFIG/config.txt");
@@ -429,7 +455,7 @@ void setup() {
 
   MSC.vendorID("JOHNFIO");
   MSC.productID("TM-CE DONGLE");
-  MSC.productRevision("0.6");
+  MSC.productRevision("0.7");
   MSC.onStartStop(onStartStop);
   MSC.onRead(onRead);
   MSC.onWrite(onWrite);
