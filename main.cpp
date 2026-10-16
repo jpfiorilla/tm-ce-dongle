@@ -49,6 +49,20 @@ static volatile uint32_t usb_reads = 0, usb_writes = 0, usb_startstops = 0;
 static volatile uint32_t usb_first_io_ms = 0;
 static Preferences prefs;
 
+// Trace of the first host IO operations (persisted with the counters) for debugging hosts like the Wii.
+struct IoTrace { uint32_t lba; uint16_t sectors; uint8_t write; uint8_t err; uint32_t at_ms; uint16_t took_ms; };
+static const int TRACE_MAX = 80;
+static IoTrace io_trace[TRACE_MAX];
+static volatile int io_trace_n = 0;
+static volatile uint32_t usb_errors = 0;
+static void trace(uint32_t lba, uint32_t bytes, bool write, bool err, uint32_t t0) {
+  if (err) usb_errors++;
+  int i = io_trace_n;
+  if (i >= TRACE_MAX) return;
+  io_trace[i] = {lba, (uint16_t)(bytes / 512), (uint8_t)write, (uint8_t)err, t0, (uint16_t)(millis() - t0)};
+  io_trace_n = i + 1;
+}
+
 // ---------------------------------------------------------------------------
 // SD card: raw access for USB, FAT mount for the sync phase
 // ---------------------------------------------------------------------------
@@ -291,12 +305,24 @@ static void sync_save(const Config &cfg, uint32_t deadline) {
 }
 
 static String previous_session() {
-  prefs.begin("tmce", true);
+  prefs.begin("tmce", false);
   uint32_t r = prefs.getUInt("reads", 0), w = prefs.getUInt("writes", 0), ss = prefs.getUInt("ss", 0), f = prefs.getUInt("first", 0);
   bool any = prefs.isKey("reads");
+  uint32_t errs = prefs.getUInt("errs", 0);
+  static IoTrace t[TRACE_MAX];
+  size_t tn = prefs.getBytes("trace", t, sizeof(t)) / sizeof(IoTrace);
+  prefs.clear();  // this session starts from zero; a silent host leaves nothing behind
   prefs.end();
   if (!any) return "";
-  return "prev session: " + String(r) + " reads, " + String(w) + " writes, " + String(ss) + " start/stop" + (f ? ", first IO at " + String(f) + "ms" : ", host never read");
+  String out = "prev session: " + String(r) + " reads, " + String(w) + " writes, " + String(errs) + " errors, " + String(ss) + " start/stop" + (f ? ", first IO at " + String(f) + "ms" : ", host never read");
+  if (tn) {
+    out += "\n  trace (t_ms lba+sectors [W] took_ms [ERR]):";
+    for (size_t i = 0; i < tn; i++) {
+      out += "\n    " + String(t[i].at_ms) + " " + String(t[i].lba) + "+" + String(t[i].sectors) + (t[i].write ? " W" : "") + " " + String(t[i].took_ms) + "ms" + (t[i].err ? " ERR" : "");
+    }
+    out += "\n ";
+  }
+  return out;
 }
 
 static void wifi_phase() {
@@ -332,17 +358,19 @@ static void wifi_phase() {
 static int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
   usb_reads++;
   if (!usb_first_io_ms) usb_first_io_ms = millis();
-  if (!card_ok) return -1;
-  if (sdmmc_read_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK) return -1;
-  return bufsize;
+  uint32_t t0 = millis();
+  bool err = !card_ok || sdmmc_read_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK;
+  trace(lba, bufsize, false, err, t0);
+  return err ? -1 : (int32_t)bufsize;
 }
 
 static int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize) {
   usb_writes++;
   if (!usb_first_io_ms) usb_first_io_ms = millis();
-  if (!card_ok) return -1;
-  if (sdmmc_write_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK) return -1;
-  return bufsize;
+  uint32_t t0 = millis();
+  bool err = !card_ok || sdmmc_write_sectors(&card, buffer, lba, bufsize / card.csd.sector_size) != ESP_OK;
+  trace(lba, bufsize, true, err, t0);
+  return err ? -1 : (int32_t)bufsize;
 }
 
 static bool onStartStop(uint8_t power_condition, bool start, bool load_eject) { usb_startstops++; return true; }
@@ -367,7 +395,7 @@ void setup() {
 
   MSC.vendorID("JOHNFIO");
   MSC.productID("TM-CE DONGLE");
-  MSC.productRevision("0.4");
+  MSC.productRevision("0.5");
   MSC.onStartStop(onStartStop);
   MSC.onRead(onRead);
   MSC.onWrite(onWrite);
@@ -386,7 +414,9 @@ void loop() {
     prefs.putUInt("writes", saved_w);
     prefs.putUInt("ss", saved_ss);
     prefs.putUInt("first", usb_first_io_ms);
+    prefs.putUInt("errs", usb_errors);
+    prefs.putBytes("trace", io_trace, sizeof(IoTrace) * io_trace_n);
     prefs.end();
   }
-  delay(2000);
+  delay(1000);
 }
