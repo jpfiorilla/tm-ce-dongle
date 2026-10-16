@@ -43,7 +43,7 @@ const server = http.createServer((req, res) => {
   const stamp = new Date().toLocaleTimeString()
   if (url === '/tmsync/v1/ping') return res.end('tmsync 1\n')
   const m = /^\/tmsync\/v1\/saves\/([A-Za-z0-9]{4})\.raw$/.exec(url)
-  if (!m || m[1].toUpperCase() !== path.basename(file, '.raw').toUpperCase()) {
+  if (!m) {
     res.writeHead(404, { Connection: 'close' })
     return res.end('not found\n')
   }
@@ -77,4 +77,4 @@ udp.bind(UDP_PORT, '0.0.0.0')
 
 const ips = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address)
 console.log(`TM Sync serving ${file}`)
-console.log(`  http://${ips[0] || 'localhost'}:${HTTP_PORT}/tmsync/v1/saves/${path.basename(file)}  (discovery on udp ${UDP_PORT})`)
+console.log(`  http://${ips[0] || 'localhost'}:${HTTP_PORT}/tmsync/v1/saves/GTME.raw  (discovery on udp ${UDP_PORT})`)
