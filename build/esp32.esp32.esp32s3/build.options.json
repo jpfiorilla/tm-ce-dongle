@@ -1,9 +1,0 @@
-{
-  "additionalFiles": "../..",
-  "compiler.optimization_flags": "-Os",
-  "customBuildProperties": "runtime.tools.ctags.path=/usr/bin,build.warn_data_percentage=75",
-  "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=4M,PartitionScheme=default",
-  "hardwareFolders": "/root/.arduino15/packages",
-  "otherLibrariesFolders": "/root/Arduino/libraries",
-  "sketchLocation": "/tmp/claude-0/-home-claude/f242d01b-2397-513c-830c-3f8ab8450ab8/scratchpad/tmce_dongle"
-}
