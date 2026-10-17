@@ -1,5 +1,7 @@
 # tm-ce-dongle
 
+![Data flow: Google Drive → Wii Memcard Manager → TM Sync / T-Dongle → Nintendont](docs/data-flow.svg)
+
 Firmware for the LilyGO T-Dongle-S3 that turns it into a USB drive for Nintendont, built so it can
 later sync the Training Mode CE save (`saves/GTME.raw`) over Wi-Fi before the Wii sees the drive.
 
